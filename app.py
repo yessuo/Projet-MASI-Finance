@@ -147,13 +147,15 @@ with col_ctrl:
         st.write("HORIZON PRÉDICTIF")
         horizon = st.slider("", 1, 30, 5) # Slider sans label pour look épuré
         st.info(f"CIBLE : J+{horizon}")
-        st.markdown("MODELE : **ARIMA(5,1,0)**")
+        # MISE A JOUR DU TEXTE SIDEBAR
+        st.markdown("MODELE : **ARIMA(2,0,2)**")
 
 with col_main:
     st.markdown("### 🚀 PROJECTION TRAJECTOIRE")
     
     with st.spinner('COMPUTING NEURAL PATH...'):
-        model = ARIMA(clean_returns, order=(5,1,0))
+        # --- MISE A JOUR DU MODELE ICI (2, 0, 2) ---
+        model = ARIMA(clean_returns, order=(2,0,2))
         res = model.fit()
         forecast = res.get_forecast(steps=horizon)
         
