@@ -4,227 +4,128 @@ import numpy as np
 import matplotlib.pyplot as plt
 from statsmodels.tsa.arima.model import ARIMA
 from arch import arch_model
+import warnings
+
+warnings.filterwarnings("ignore")
 
 # ==========================================
-# 0. CONFIGURATION DE LA PAGE
+# 0. CONFIGURATION
 # ==========================================
-st.set_page_config(
-    page_title="MASI Prédictions Pro", 
-    page_icon="📈", 
-    layout="wide"
-)
-
-# Style CSS personnalisé pour cacher les menus par défaut et épurer
-st.markdown("""
-<style>
-    .reportview-container { margin-top: -2em; }
-    #MainMenu {visibility: hidden;}
-    .stDeployButton {display:none;}
-    footer {visibility: hidden;}
-    #stDecoration {display:none;}
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="MASI Prédiction", layout="wide")
 
 # ==========================================
-# 1. CHARGEMENT DES DONNÉES
+# 1. CHARGEMENT ROBUSTE
 # ==========================================
 @st.cache_data
-def get_data():
+def load_data():
     file_name = "Moroccan All Shares Historical Data.csv"
+    
+    # 1. Vérification basique : Est-ce que le fichier existe ?
+    import os
+    if not os.path.exists(file_name):
+        return None, f"⚠️ Fichier '{file_name}' introuvable. Vérifiez qu'il est bien à côté de app.py."
+
     try:
-        # Chargement avec gestion des milliers (12,000.00)
+        # 2. Tentative de lecture flexible (séparateur automatique)
+        # On essaie d'abord avec la virgule pour les milliers
         df = pd.read_csv(file_name, thousands=',', decimal='.')
         
-        # Nettoyage des noms de colonnes
+        # Si ça a mal lu (tout dans une colonne), on réessaie avec point-virgule
+        if len(df.columns) < 2:
+            df = pd.read_csv(file_name, sep=';')
+
+        # Nettoyage des colonnes (enlève les espaces)
         df.columns = df.columns.str.strip()
         
-        # Identification de la colonne prix
-        col_prix = 'Price' if 'Price' in df.columns else 'Dernier'
+        # 3. Trouver la colonne PRIX et DATE
+        cols = df.columns.tolist()
+        col_prix = next((c for c in cols if 'Price' in c or 'Dernier' in c or 'Close' in c), None)
+        col_date = next((c for c in cols if 'Date' in c), None)
+
+        if not col_prix or not col_date:
+            return None, f"⚠️ Colonnes non trouvées. Colonnes détectées : {cols}"
+
+        # 4. Conversion
+        df[col_date] = pd.to_datetime(df[col_date])
+        df = df.sort_values(col_date).set_index(col_date)
         
-        # Gestion des dates
-        df['Date'] = pd.to_datetime(df['Date'])
-        df = df.sort_values('Date').set_index('Date')
-        
-        # Calcul des Rendements Logarithmiques (Indispensable pour les modèles)
+        # Conversion du prix en numérique (si c'est encore du texte '12,000')
+        if df[col_prix].dtype == object:
+            df[col_prix] = df[col_prix].str.replace(',', '').astype(float)
+
+        # Calcul Log Return
         df['Log_Return'] = np.log(df[col_prix] / df[col_prix].shift(1))
-        
-        # Création d'une série propre sans NaN pour l'entraînement
         clean_returns = df['Log_Return'].replace([np.inf, -np.inf], np.nan).dropna()
         
         return df, clean_returns, col_prix
-        
+
     except Exception as e:
-        st.error(f"⚠️ Erreur critique : Impossible de charger le fichier '{file_name}'. \nDétail: {e}")
-        return None, None, None
+        return None, f"⚠️ Erreur de lecture : {str(e)}"
 
 # ==========================================
-# 2. INTERFACE (SIDEBAR)
+# 2. INTERFACE
 # ==========================================
-st.sidebar.header("🎛️ Paramètres de Simulation")
-horizon = st.sidebar.slider("Horizon de prévision (Jours)", min_value=1, max_value=30, value=5)
+st.title("📈 Prédiction MASI (Mode Correction)")
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### ℹ️ À propos")
-st.sidebar.info(
-    """
-    **Modèle Tendance :** ARIMA (5,1,0)
-    **Modèle Risque :** GARCH (1,1)
-    
-    Ce tableau de bord aide à anticiper la trajectoire
-    du MASI et à surveiller la volatilité.
-    """
-)
+df, clean_returns, col_prix = load_data()
 
-# ==========================================
-# 3. CORPS PRINCIPAL
-# ==========================================
-st.title("📈 Tableau de Bord Stratégique : MASI")
-st.markdown("### Prévision de la trajectoire et Analyse du Risque")
+# Si le chargement a échoué, on affiche l'erreur
+if df is None:
+    st.error(clean_returns) # Ici clean_returns contient le message d'erreur
+    st.stop() # On arrête tout
 
-# Chargement
-df, clean_returns, col_prix = get_data()
+# Si on arrive ici, c'est que les données sont chargées !
+horizon = st.slider("Horizon (Jours)", 1, 30, 5)
 
-if df is not None:
-    # --- A. KPI EN TÊTE ---
-    st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    last_price = df[col_prix].iloc[-1]
-    prev_price = df[col_prix].iloc[-2]
-    var_day = ((last_price - prev_price) / prev_price) * 100
-    
-    volatility_hist = clean_returns.std() * np.sqrt(252) * 100
-    
-    col1.metric("Dernier Cours (MASI)", f"{last_price:,.2f}", f"{var_day:.2f}%")
-    col2.metric("Horizon Prévision", f"{horizon} Jours")
-    col3.metric("Volatilité An. (Hist)", f"{volatility_hist:.2f}%")
-    col4.metric("Données Disponibles", f"{len(df)} Séances")
-    
-    st.markdown("---")
-
-    # ==========================================
-    # --- B. PRÉVISION DE PRIX (ARIMA RECONSTRUIT) ---
-    # ==========================================
-    st.subheader(f"🔮 Trajectoire Prévue (Projection des Prix)")
-    
-    with st.spinner('Calcul des trajectoires en cours...'):
-        
-        # 1. Entraînement ARIMA
-        # On utilise (5,1,0) qui est standard et robuste pour des données journalières
+# --- A. PRÉVISION PRIX (ARIMA) ---
+try:
+    with st.spinner('Calcul ARIMA...'):
         model_arima = ARIMA(clean_returns, order=(5, 1, 0))
         fit_arima = model_arima.fit()
+        forecast = fit_arima.get_forecast(steps=horizon)
         
-        # 2. Prévision des rendements
-        forecast_res = fit_arima.get_forecast(steps=horizon)
-        forecast_log_returns = forecast_res.predicted_mean
-        conf_int_log = forecast_res.conf_int(alpha=0.05)
+        # Reconstruction Prix
+        last_price = df[col_prix].iloc[-1]
+        pred_returns = forecast.predicted_mean
+        pred_prices = last_price * np.exp(np.cumsum(pred_returns))
         
-        # 3. RECONSTRUCTION DU PRIX (La formule magique)
-        # Prix_t = Prix_{t-1} * exp(sum(r))
-        last_real_date = df.index[-1]
+        # Dates
+        dates = pd.date_range(df.index[-1], periods=horizon+1, freq='B')[1:]
         
-        # Cumul des rendements prévus
-        cumulative_returns = np.cumsum(forecast_log_returns)
-        forecast_prices = last_price * np.exp(cumulative_returns)
+        # Affichage
+        st.subheader("Trajectoire Prévue")
+        col1, col2 = st.columns([3, 1])
         
-        # Cumul des bornes (Approximation pour la visualisation)
-        cumulative_lower = np.cumsum(conf_int_log.iloc[:, 0])
-        cumulative_upper = np.cumsum(conf_int_log.iloc[:, 1])
-        lower_conf_price = last_price * np.exp(cumulative_lower)
-        upper_conf_price = last_price * np.exp(cumulative_upper)
-        
-        # Dates futures
-        future_dates = pd.date_range(start=last_real_date, periods=horizon + 1, freq='B')[1:]
-        
-        # 4. AFFICHAGE SPLIT (Graphique à gauche, Chiffres à droite)
-        c_graph, c_kpi = st.columns([3, 1])
-        
-        with c_graph:
-            fig_arima, ax = plt.subplots(figsize=(10, 5))
-            
-            # Historique (90 derniers jours)
-            history = df[col_prix].iloc[-90:]
-            ax.plot(history.index, history.values, label='Historique Réel', color='#2c3e50', linewidth=1.5)
-            
-            # Pont (Liaison)
-            ax.plot([last_real_date, future_dates[0]], [last_price, forecast_prices[0]], 
-                    color='#e74c3c', linestyle='--')
-            
-            # Prévision
-            ax.plot(future_dates, forecast_prices, 
-                    label=f'Prévision ARIMA', color='#e74c3c', linestyle='--', marker='o', markersize=4)
-            
-            # Cône de confiance
-            dates_cone = [last_real_date] + list(future_dates)
-            lower_cone = [last_price] + list(lower_conf_price)
-            upper_cone = [last_price] + list(upper_conf_price)
-            
-            ax.fill_between(dates_cone, lower_cone, upper_cone, color='#e74c3c', alpha=0.15, label='Zone de Confiance 95%')
-            
-            ax.set_title("Projection continue du MASI", fontsize=10)
-            ax.grid(True, linestyle=':', alpha=0.6)
+        with col1:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(df.index[-60:], df[col_prix].iloc[-60:], label="Historique")
+            ax.plot(dates, pred_prices, color='red', label="Prévision", linestyle='--')
             ax.legend()
-            st.pyplot(fig_arima)
+            st.pyplot(fig)
             
-        with c_kpi:
-            st.markdown("### 🎯 Objectif")
-            final_price = forecast_prices[-1]
-            perf_pct = ((final_price - last_price) / last_price) * 100
-            
-            st.metric(
-                label=f"Cible à {horizon} jours",
-                value=f"{final_price:,.0f}",
-                delta=f"{perf_pct:.2f} %"
-            )
-            
-            if perf_pct > 0:
-                st.success("Signal : ACHAT (Hausse)")
+        with col2:
+            cible = pred_prices.iloc[-1]
+            st.metric("Cible", f"{cible:,.0f}")
+            if cible > last_price:
+                st.success("Hausse prévue")
             else:
-                st.error("Signal : VENTE (Baisse)")
-                
-            st.info("L'intervalle rouge indique la zone de probabilité à 95%.")
+                st.error("Baisse prévue")
 
-    st.markdown("---")
+except Exception as e:
+    st.error(f"Erreur dans le calcul ARIMA : {e}")
 
-    # ==========================================
-    # --- C. ANALYSE DU RISQUE (GARCH) ---
-    # ==========================================
-    st.subheader("🛡️ Analyse de la Volatilité (Risque de Marché)")
+# --- B. RISQUE (GARCH) ---
+try:
+    st.subheader("Analyse de Volatilité")
+    # On multiplie par 100 pour stabiliser GARCH
+    garch = arch_model(clean_returns * 100, p=1, q=1)
+    res = garch.fit(disp='off')
+    st.success("✅ Modèle GARCH calibré avec succès")
     
-    with st.spinner('Modélisation de la variance (GARCH) en cours...'):
-        # On multiplie par 100 pour que le GARCH converge mieux (échelle %)
-        returns_scaled = clean_returns * 100
-        
-        # Modèle GARCH(1,1) standard
-        garch = arch_model(returns_scaled, vol='Garch', p=1, q=1)
-        res_garch = garch.fit(disp='off')
-        
-        # Forecast de la volatilité
-        forecast_garch = res_garch.forecast(horizon=horizon)
-        future_vol = np.sqrt(forecast_garch.variance.values[-1, :])
-        
-        # Indicateurs
-        curr_vol = future_vol[0]
-        avg_vol = res_garch.conditional_volatility.mean()
-        
-        c_vol1, c_vol2 = st.columns(2)
-        
-        # Jauge de nervosité
-        etat_marche = "CALME" if curr_vol < avg_vol else "NERVEUX"
-        couleur_etat = "green" if curr_vol < avg_vol else "red"
-        
-        c_vol1.markdown(f"#### État du Marché : :{couleur_etat}[{etat_marche}]")
-        c_vol1.metric("Volatilité Prévue (Demain)", f"{curr_vol:.2f}%", delta=f"{curr_vol - avg_vol:.2f}%", delta_color="inverse")
-        
-        # Graphique GARCH
-        fig_garch, ax2 = plt.subplots(figsize=(10, 3))
-        ax2.plot(res_garch.conditional_volatility.iloc[-180:], color='#f39c12', label='Volatilité Conditionnelle')
-        ax2.axhline(avg_vol, color='grey', linestyle='--', label='Risque Moyen')
-        ax2.set_title("Évolution de la nervosité du marché (6 derniers mois)")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        c_vol2.pyplot(fig_garch)
+    # Graphique Volatilité
+    fig2, ax2 = plt.subplots(figsize=(10, 3))
+    ax2.plot(res.conditional_volatility.iloc[-100:], color='orange', label='Volatilité')
+    st.pyplot(fig2)
 
-else:
-    st.warning("⚠️ Fichier de données introuvable. Veuillez vérifier l'emplacement du fichier CSV.")
+except Exception as e:
+    st.warning(f"Le module GARCH n'a pas pu tourner (souvent un problème de version ou de données). Erreur : {e}")
